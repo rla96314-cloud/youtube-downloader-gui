@@ -40,14 +40,15 @@ jobs:
           --name YouTubeDownloader
           youtube_downloader.py
 
-      - name: Upload artifact (모든 실행에서)
+      - name: Upload artifact (용량 초과해도 빌드는 계속)
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: YouTubeDownloader-exe
           path: dist/YouTubeDownloader.exe
 
-      - name: Attach to Release (태그 푸시일 때만)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Attach to Release (태그 푸시일 때만 · 아티팩트와 무관)
+        if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
         uses: softprops/action-gh-release@v2
         with:
           files: dist/YouTubeDownloader.exe
