@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# ffmpeg 번들 (직접 넣는 경우 – 용량 큼)
+ffmpeg
+ffmpeg.exe
+
+# OS
+.DS_Store
+Thumbs.db
