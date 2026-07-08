@@ -1,0 +1,53 @@
+name: Build Windows EXE
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:   # 저장소 Actions 탭에서 수동 실행 가능
+
+permissions:
+  contents: write       # 릴리스에 exe 업로드용
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Download ffmpeg (번들용)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_extracted
+          $exe = Get-ChildItem -Recurse ffmpeg_extracted -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $exe.FullName -Destination ffmpeg.exe
+          Write-Host "ffmpeg.exe bundled from $($exe.FullName)"
+
+      - name: Build single-file EXE (PyInstaller)
+        run: >
+          pyinstaller --noconfirm --onefile --windowed
+          --add-data "icons;icons"
+          --add-binary "ffmpeg.exe;."
+          --name YouTubeDownloader
+          youtube_downloader.py
+
+      - name: Upload artifact (모든 실행에서)
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouTubeDownloader-exe
+          path: dist/YouTubeDownloader.exe
+
+      - name: Attach to Release (태그 푸시일 때만)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/YouTubeDownloader.exe

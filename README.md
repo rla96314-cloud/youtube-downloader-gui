@@ -18,8 +18,11 @@
   - 단일 파일(최고, 병합 불필요) — `best`
   - 음성만 (MP3) — `bestaudio/best` → 192kbps MP3 추출
 - 코덱 선택: 기본은 **H.264(MP4) 우선**(호환성↑, 보통 최대 1080p), 체크 시 **AV1/VP9 허용**(4K 등 초고화질)
+- **구간 잘라받기** ✂ — 시작~끝 시간(`90` · `1:30` · `1:02:03`)만 잘라서 저장 (빈칸이면 처음/끝까지). 키프레임 정렬로 정확히 컷
+- **재생목록 전체 받기** 📚 — 재생목록 URL 을 통째로. `재생목록이름/순번. 제목` 형태로 하위폴더 저장
+- **자막** 💬 — 자막 파일(SRT) 별도 저장 / 영상에 입히기(내장) 선택, 언어 코드 지정(기본 `ko,en`, 자동생성 자막 포함)
 - 저장 폴더 선택, 진행 로그
-- ffmpeg 가 없으면 자동으로 병합 불필요 단일 포맷으로 대체
+- ffmpeg 가 없으면 자동으로 병합 불필요 단일 포맷으로 대체 (구간/자막 입히기도 ffmpeg 필요)
 
 ## 설치 & 실행
 
@@ -50,6 +53,14 @@ pyinstaller --noconfirm --onefile --windowed \
 ```
 
 `icon.ico` / `icon.png` 가 있으면 `--icon` 및 `--add-data` 로 함께 포함하면 창 아이콘으로 사용됩니다.
+
+### 자동 빌드 (GitHub Actions)
+
+`.github/workflows/build-windows.yml` 이 **Windows 러너에서 exe 를 자동 빌드**합니다 (ffmpeg.exe 자동 번들).
+PyInstaller 는 크로스 컴파일이 안 되므로 Windows exe 는 이 워크플로(또는 실제 Windows PC)에서만 만들 수 있습니다.
+
+- **수동 실행**: 저장소 → Actions → *Build Windows EXE* → *Run workflow* → 완료 후 Artifacts 에서 `YouTubeDownloader.exe` 다운로드
+- **릴리스**: `git tag v1.1.0 && git push origin v1.1.0` → 빌드 후 해당 태그 Release 에 exe 자동 첨부
 
 ## 프로젝트 구조
 

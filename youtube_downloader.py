@@ -74,6 +74,13 @@ class DownloaderApp(ctk.CTk):
         ('음성만 (MP3)', 'bestaudio/best', True),
     ]
 
+    # 자막 옵션: (표시 이름, 내부 모드)
+    SUBS_OPTIONS = [
+        ('자막 없음', 'none'),
+        ('자막 파일(SRT)', 'file'),
+        ('영상에 입히기', 'embed'),
+    ]
+
     def __init__(self):
         super().__init__()
         ctk.set_appearance_mode('light')
@@ -96,6 +103,13 @@ class DownloaderApp(ctk.CTk):
         self.format_var = tk.StringVar(value=self.FORMAT_PRESETS[0][0])
         self.allow_av1_var = tk.BooleanVar(value=False)
         self.folder_var = tk.StringVar(value=os.path.join(os.path.expanduser('~'), 'Downloads'))
+        # 추가 기능용 상태
+        self.playlist_var = tk.BooleanVar(value=False)
+        self.clip_var = tk.BooleanVar(value=False)
+        self.clip_start_var = tk.StringVar(value='')
+        self.clip_end_var = tk.StringVar(value='')
+        self.subs_var = tk.StringVar(value=self.SUBS_OPTIONS[0][0])
+        self.subs_lang_var = tk.StringVar(value='ko,en')
 
         self._build_ui()
         self.after(100, self._poll_queue)
@@ -247,6 +261,7 @@ class DownloaderApp(ctk.CTk):
             dropdown_fg_color='#FFFFFF',
             dropdown_text_color=HEADING,
             dropdown_hover_color='#EAF1FB',
+            command=lambda _=None: self._sync_option_states(),
         )
         self.format_menu.grid(row=1, column=1, columnspan=2, sticky='ew', pady=8)
 
@@ -260,8 +275,105 @@ class DownloaderApp(ctk.CTk):
             hover_color=ACCENT_HOVER,
             checkbox_width=20,
             checkbox_height=20,
+            command=self._sync_option_states,
         )
         self.av1_check.grid(row=2, column=1, columnspan=2, sticky='w', pady=(4, 2))
+
+        # ── 자막 ────────────────────────────────────────────────────
+        ctk.CTkLabel(
+            grid,
+            text='  자막',
+            font=self.font_label,
+            text_color=HEADING,
+            image=self._icon('subs', 20),
+            compound='left',
+        ).grid(row=3, column=0, sticky='w', pady=8, padx=(0, 14))
+        subs_row = ctk.CTkFrame(grid, fg_color='transparent')
+        subs_row.grid(row=3, column=1, columnspan=2, sticky='ew', pady=8)
+        self.subs_menu = ctk.CTkComboBox(
+            subs_row,
+            variable=self.subs_var,
+            values=[o[0] for o in self.SUBS_OPTIONS],
+            font=self.font_body,
+            height=42,
+            width=180,
+            corner_radius=10,
+            state='readonly',
+            fg_color='#FFFFFF',
+            text_color=HEADING,
+            border_color=BORDER,
+            button_color='#FFFFFF',
+            button_hover_color='#EEF3FB',
+            dropdown_fg_color='#FFFFFF',
+            dropdown_text_color=HEADING,
+            dropdown_hover_color='#EAF1FB',
+            command=lambda _=None: self._sync_option_states(),
+        )
+        self.subs_menu.pack(side='left')
+        self.subs_lang_entry = ctk.CTkEntry(
+            subs_row,
+            textvariable=self.subs_lang_var,
+            font=self.font_body,
+            height=42,
+            width=120,
+            corner_radius=10,
+            fg_color='#FFFFFF',
+            border_color=BORDER,
+            placeholder_text='ko,en',
+        )
+        self.subs_lang_entry.pack(side='left', padx=(10, 0))
+        ctk.CTkLabel(
+            subs_row, text='  언어(쉼표 구분, 자동자막 포함)', font=self.font_body, text_color=SUBTLE
+        ).pack(side='left', padx=(8, 0))
+
+        # ── 재생구간 잘라받기 ───────────────────────────────────────
+        self.clip_check = ctk.CTkCheckBox(
+            grid,
+            text='  구간 잘라받기',
+            variable=self.clip_var,
+            font=self.font_body,
+            text_color='#55606E',
+            fg_color=ACCENT,
+            hover_color=ACCENT_HOVER,
+            checkbox_width=20,
+            checkbox_height=20,
+            command=self._sync_option_states,
+        )
+        self.clip_check.grid(row=4, column=0, sticky='w', pady=8, padx=(0, 14))
+        clip_row = ctk.CTkFrame(grid, fg_color='transparent')
+        clip_row.grid(row=4, column=1, columnspan=2, sticky='ew', pady=8)
+        self.clip_start_entry = ctk.CTkEntry(
+            clip_row, textvariable=self.clip_start_var, font=self.font_body,
+            height=42, width=90, corner_radius=10, fg_color='#FFFFFF',
+            border_color=BORDER, placeholder_text='시작',
+        )
+        self.clip_start_entry.pack(side='left')
+        ctk.CTkLabel(clip_row, text='  ~  ', font=self.font_body, text_color=SUBTLE).pack(side='left')
+        self.clip_end_entry = ctk.CTkEntry(
+            clip_row, textvariable=self.clip_end_var, font=self.font_body,
+            height=42, width=90, corner_radius=10, fg_color='#FFFFFF',
+            border_color=BORDER, placeholder_text='끝',
+        )
+        self.clip_end_entry.pack(side='left')
+        ctk.CTkLabel(
+            clip_row, text='  예: 1:30  ·  빈칸이면 처음/끝까지', font=self.font_body, text_color=SUBTLE
+        ).pack(side='left', padx=(8, 0))
+
+        # ── 플레이리스트 ────────────────────────────────────────────
+        self.playlist_check = ctk.CTkCheckBox(
+            grid,
+            text='  재생목록 전체 받기 (하위폴더 + 순번으로 저장)',
+            variable=self.playlist_var,
+            font=self.font_body,
+            text_color='#55606E',
+            fg_color=ACCENT,
+            hover_color=ACCENT_HOVER,
+            checkbox_width=20,
+            checkbox_height=20,
+        )
+        self.playlist_check.grid(row=5, column=1, columnspan=2, sticky='w', pady=(2, 4))
+
+        self._sync_option_states()
 
         # ── 버튼 ────────────────────────────────────────────────────
         btns = ctk.CTkFrame(outer, fg_color='transparent')
@@ -374,6 +486,46 @@ class DownloaderApp(ctk.CTk):
         if folder:
             self.folder_var.set(folder)
 
+    def _current_subs_mode(self):
+        label = self.subs_var.get()
+        return next((mode for name, mode in self.SUBS_OPTIONS if name == label), 'none')
+
+    def _sync_option_states(self):
+        """포맷/체크박스 상태에 따라 관련 입력칸을 활성/비활성화합니다."""
+        is_audio = '음성만' in self.format_var.get()
+        # 자막은 영상에만 의미가 있음
+        self.subs_menu.configure(state='disabled' if is_audio else 'readonly')
+        if is_audio:
+            self.subs_var.set(self.SUBS_OPTIONS[0][0])
+        subs_on = (not is_audio) and self._current_subs_mode() != 'none'
+        self.subs_lang_entry.configure(state='normal' if subs_on else 'disabled')
+        # 구간 입력칸
+        clip_on = self.clip_var.get()
+        self.clip_start_entry.configure(state='normal' if clip_on else 'disabled')
+        self.clip_end_entry.configure(state='normal' if clip_on else 'disabled')
+
+    @staticmethod
+    def _fmt_secs(sec):
+        sec = int(round(sec))
+        h, rem = divmod(sec, 3600)
+        m, s = divmod(rem, 60)
+        return f'{h}:{m:02d}:{s:02d}' if h else f'{m}:{s:02d}'
+
+    @staticmethod
+    def _parse_time(text):
+        """'90' / '1:30' / '1:02:03' → 초(float). 빈칸이면 None, 형식오류면 False."""
+        text = (text or '').strip()
+        if not text:
+            return None
+        try:
+            parts = [float(p) for p in text.split(':')]
+        except ValueError:
+            return False
+        seconds = 0.0
+        for p in parts:
+            seconds = seconds * 60 + p
+        return seconds
+
     def _start_download(self):
         if yt_dlp is None:
             messagebox.showerror(APP_TITLE, 'yt-dlp 가 설치되어 있지 않습니다.')
@@ -391,6 +543,30 @@ class DownloaderApp(ctk.CTk):
         preset = next(p for p in self.FORMAT_PRESETS if p[0] == self.format_var.get())
         prefer_h264 = not self.allow_av1_var.get()
 
+        # 구간 잘라받기 옵션 파싱/검증
+        clip = None
+        if self.clip_var.get():
+            start = self._parse_time(self.clip_start_var.get())
+            end = self._parse_time(self.clip_end_var.get())
+            if start is False or end is False:
+                messagebox.showwarning(APP_TITLE, "구간 시간 형식이 올바르지 않습니다.\n예: 90  ·  1:30  ·  1:02:03")
+                return
+            if start is None and end is None:
+                messagebox.showwarning(APP_TITLE, '구간 잘라받기를 켰다면 시작 또는 끝 시간을 입력하세요.')
+                return
+            if start is not None and end is not None and end <= start:
+                messagebox.showwarning(APP_TITLE, '끝 시간은 시작 시간보다 커야 합니다.')
+                return
+            clip = (start if start is not None else 0.0,
+                    end if end is not None else float('inf'))
+
+        extra = {
+            'playlist': self.playlist_var.get(),
+            'clip': clip,
+            'subs': self._current_subs_mode(),
+            'subs_langs': self.subs_lang_var.get(),
+        }
+
         self.cancel_flag.clear()
         self.download_btn.configure(state='disabled')
         self.cancel_btn.configure(state='normal')
@@ -400,7 +576,7 @@ class DownloaderApp(ctk.CTk):
 
         self.download_thread = threading.Thread(
             target=self._download_worker,
-            args=(urls, folder, preset, prefer_h264),
+            args=(urls, folder, preset, prefer_h264, extra),
             daemon=True,
         )
         self.download_thread.start()
@@ -409,7 +585,13 @@ class DownloaderApp(ctk.CTk):
         self.cancel_flag.set()
         self.status_label.configure(text='취소 요청됨… 현재 항목 종료 후 중단합니다.')
 
-    def _download_worker(self, urls, folder, preset, prefer_h264):
+    def _download_worker(self, urls, folder, preset, prefer_h264, extra=None):
+        extra = extra or {}
+        playlist = bool(extra.get('playlist'))
+        clip = extra.get('clip')
+        subs_mode = extra.get('subs', 'none')
+        subs_langs = extra.get('subs_langs', 'ko,en')
+
         label, fmt, needs_ffmpeg = preset
         is_audio = '음성만' in label
         ffmpeg_ok = has_ffmpeg()
@@ -417,6 +599,13 @@ class DownloaderApp(ctk.CTk):
             self.msg_queue.put(('log', f"⚠ '{label}' 은 ffmpeg 가 필요합니다. '단일 파일' 방식으로 대체합니다."))
             fmt = 'best'
             is_audio = False
+        # 구간/자막 후처리도 ffmpeg 가 필요
+        if clip and not ffmpeg_ok:
+            self.msg_queue.put(('log', '⚠ 구간 잘라받기는 ffmpeg 가 필요합니다. 전체 영상으로 받습니다.'))
+            clip = None
+        if subs_mode == 'embed' and not ffmpeg_ok:
+            self.msg_queue.put(('log', '⚠ 자막 입히기는 ffmpeg 가 필요합니다. 자막 파일(SRT)로 대체합니다.'))
+            subs_mode = 'file'
 
         def hook(d):
             if self.cancel_flag.is_set():
@@ -434,15 +623,21 @@ class DownloaderApp(ctk.CTk):
                 self.msg_queue.put(('status', '후처리 중… (병합/변환)'))
                 return
 
+        if playlist:
+            outtmpl = os.path.join(folder, '%(playlist_title)s', '%(playlist_index)s. %(title)s.%(ext)s')
+        else:
+            outtmpl = os.path.join(folder, '%(title)s.%(ext)s')
+
         ydl_opts = {
             'format': fmt,
-            'outtmpl': os.path.join(folder, '%(title)s.%(ext)s'),
+            'outtmpl': outtmpl,
             'progress_hooks': [hook],
             'noprogress': True,
             'ignoreerrors': False,
             'restrictfilenames': True,
             'quiet': True,
             'no_warnings': True,
+            'noplaylist': not playlist,
         }
         if prefer_h264 and not is_audio:
             ydl_opts['format_sort'] = ['vcodec:h264', 'acodec:aac']
@@ -451,14 +646,44 @@ class DownloaderApp(ctk.CTk):
         _ff = ffmpeg_dir()
         if _ff:
             ydl_opts['ffmpeg_location'] = _ff
+
+        postprocessors = []
         if is_audio and ffmpeg_ok:
-            ydl_opts['postprocessors'] = [
+            postprocessors.append(
                 {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}
-            ]
+            )
+
+        # 구간 잘라받기
+        if clip:
+            from yt_dlp.utils import download_range_func
+            ydl_opts['download_ranges'] = download_range_func(None, [clip])
+            ydl_opts['force_keyframes_at_cuts'] = True
+            s, e = clip
+            rng = f"{self._fmt_secs(s)} ~ {'끝' if e == float('inf') else self._fmt_secs(e)}"
+            self.msg_queue.put(('log', f'구간: {rng}'))
+
+        # 자막 (영상에만)
+        if not is_audio and subs_mode != 'none':
+            langs = [l.strip() for l in subs_langs.split(',') if l.strip()] or ['ko', 'en']
+            ydl_opts['writesubtitles'] = True
+            ydl_opts['writeautomaticsub'] = True
+            ydl_opts['subtitleslangs'] = langs
+            if subs_mode == 'file':
+                ydl_opts['subtitlesformat'] = 'srt/best'
+                postprocessors.append({'key': 'FFmpegSubtitlesConvertor', 'format': 'srt'})
+                self.msg_queue.put(('log', f"자막: 파일(SRT) [{', '.join(langs)}]"))
+            else:  # embed
+                postprocessors.append({'key': 'FFmpegEmbedSubtitle'})
+                self.msg_queue.put(('log', f"자막: 영상에 입히기 [{', '.join(langs)}]"))
+
+        if postprocessors:
+            ydl_opts['postprocessors'] = postprocessors
 
         if not is_audio:
             mode = 'H.264(MP4) 우선' if prefer_h264 else 'AV1/VP9 허용(최고화질)'
             self.msg_queue.put(('log', f'코덱: {mode}'))
+        if playlist:
+            self.msg_queue.put(('log', '재생목록 전체 다운로드 모드'))
 
         total_count = len(urls)
         success = 0
