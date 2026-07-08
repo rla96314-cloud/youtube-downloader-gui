@@ -35,7 +35,10 @@ jobs:
       - name: Build single-file EXE (PyInstaller)
         run: >
           pyinstaller --noconfirm --onefile --windowed
+          --icon icon.ico
           --add-data "icons;icons"
+          --add-data "icon.ico;."
+          --add-data "icon.png;."
           --add-binary "ffmpeg.exe;."
           --name YouTubeDownloader
           youtube_downloader.py

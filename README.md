@@ -41,18 +41,23 @@ pip install pyinstaller
 
 # Windows
 pyinstaller --noconfirm --onefile --windowed \
+  --icon icon.ico \
   --add-data "icons;icons" \
+  --add-data "icon.ico;." --add-data "icon.png;." \
   --add-binary "ffmpeg.exe;." \
   --name YouTubeDownloader youtube_downloader.py
 
 # macOS / Linux (경로 구분자는 콜론)
 pyinstaller --noconfirm --onefile --windowed \
+  --icon icon.png \
   --add-data "icons:icons" \
+  --add-data "icon.ico:." --add-data "icon.png:." \
   --add-binary "ffmpeg:." \
   --name YouTubeDownloader youtube_downloader.py
 ```
 
-`icon.ico` / `icon.png` 가 있으면 `--icon` 및 `--add-data` 로 함께 포함하면 창 아이콘으로 사용됩니다.
+프로그램(창·작업표시줄·exe) 아이콘은 `icon.ico`(Windows) / `icon.png`(맥·리눅스) 를 사용합니다.
+아이콘을 바꾸려면 `make_icon.py` 를 수정한 뒤 `python make_icon.py` 로 다시 생성하세요.
 
 ### 자동 빌드 (GitHub Actions)
 
@@ -66,6 +71,8 @@ PyInstaller 는 크로스 컴파일이 안 되므로 Windows exe 는 이 워크�
 
 ```
 youtube_downloader.py   # 앱 전체 (단일 파일)
+make_icon.py            # 프로그램 아이콘 생성기 (icon.png / icon.ico)
+icon.png / icon.ico     # 프로그램(창·exe) 아이콘
 icons/                  # UI 아이콘 (link, gear, folder, video, download, activity, help, folder_blue)
 requirements.txt
 ```
