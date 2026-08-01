@@ -47,17 +47,24 @@ pyinstaller --noconfirm --onefile --windowed \
   --add-binary "ffmpeg.exe;." \
   --name YouTubeDownloader youtube_downloader.py
 
-# macOS / Linux (경로 구분자는 콜론)
-pyinstaller --noconfirm --onefile --windowed \
-  --icon icon.png \
+# macOS (.app 번들 — onedir + icns)
+pyinstaller --noconfirm --onedir --windowed \
+  --icon icon.icns \
   --add-data "icons:icons" \
-  --add-data "icon.ico:." --add-data "icon.png:." \
+  --add-data "icon.icns:." --add-data "icon.png:." \
+  --add-binary "ffmpeg:." \
+  --name YouTubeDownloader youtube_downloader.py
+# → dist/YouTubeDownloader.app
+
+# Linux (단일 실행파일)
+pyinstaller --noconfirm --onefile --windowed \
+  --add-data "icons:icons" --add-data "icon.png:." \
   --add-binary "ffmpeg:." \
   --name YouTubeDownloader youtube_downloader.py
 ```
 
-프로그램(창·작업표시줄·exe) 아이콘은 `icon.ico`(Windows) / `icon.png`(맥·리눅스) 를 사용합니다.
-아이콘을 바꾸려면 `make_icon.py` 를 수정한 뒤 `python make_icon.py` 로 다시 생성하세요.
+프로그램 아이콘: `icon.ico`(Windows) / `icon.icns`(macOS) / `icon.png`(창 아이콘·리눅스).
+아이콘을 바꾸려면 `make_icon.py` 를 수정한 뒤 `python make_icon.py` 로 셋 다 다시 생성하세요.
 
 ### 자동 빌드 (GitHub Actions)
 
@@ -67,12 +74,21 @@ PyInstaller 는 크로스 컴파일이 안 되므로 Windows exe 는 이 워크�
 - **수동 실행**: 저장소 → Actions → *Build Windows EXE* → *Run workflow* → 완료 후 Artifacts 에서 `YouTubeDownloader.exe` 다운로드
 - **릴리스**: `git tag v1.1.0 && git push origin v1.1.0` → 빌드 후 해당 태그 Release 에 exe 자동 첨부
 
+`.github/workflows/build-macos.yml` 은 **macOS 러너에서 `.app` 을 자동 빌드**합니다
+(Apple Silicon `arm64` + Intel `x86_64` 둘 다, ffmpeg 정적 바이너리 자동 번들, `.zip` 으로 패키징).
+
+- **수동 실행**: Actions → *Build macOS App* → *Run workflow* → Artifacts 에서 `YouTubeDownloader-macos-<arch>.zip` 다운로드
+- **릴리스**: 태그 푸시 시 각 아키텍처 `.zip` 이 Release 에 자동 첨부
+
+> ⚠️ 코드 서명을 하지 않았으므로, 처음 실행할 때 "확인되지 않은 개발자" 경고가 뜹니다.
+> **우클릭 → 열기** 로 한 번 허용하거나, 터미널에서 `xattr -dr com.apple.quarantine YouTubeDownloader.app` 을 실행하세요.
+
 ## 프로젝트 구조
 
 ```
 youtube_downloader.py   # 앱 전체 (단일 파일)
-make_icon.py            # 프로그램 아이콘 생성기 (icon.png / icon.ico)
-icon.png / icon.ico     # 프로그램(창·exe) 아이콘
+make_icon.py            # 프로그램 아이콘 생성기 (icon.png / icon.ico / icon.icns)
+icon.png / icon.ico / icon.icns  # 프로그램 아이콘 (창 / Windows exe / macOS app)
 icons/                  # UI 아이콘 (link, gear, folder, video, download, activity, help, folder_blue)
 requirements.txt
 ```

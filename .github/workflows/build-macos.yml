@@ -1,0 +1,68 @@
+name: Build macOS App
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:   # 저장소 Actions 탭에서 수동 실행 가능
+
+permissions:
+  contents: write       # 릴리스에 앱 업로드용
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14   # Apple Silicon (arm64)
+            arch: arm64
+          - runner: macos-13   # Intel (x86_64)
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Download ffmpeg (번들용)
+        run: |
+          curl -L "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -o ffmpeg.zip
+          unzip -o ffmpeg.zip
+          chmod +x ffmpeg
+          ./ffmpeg -version | head -1
+
+      - name: Build .app (PyInstaller)
+        run: >
+          pyinstaller --noconfirm --onedir --windowed
+          --icon icon.icns
+          --add-data "icons:icons"
+          --add-data "icon.icns:." --add-data "icon.png:."
+          --add-binary "ffmpeg:."
+          --name YouTubeDownloader
+          youtube_downloader.py
+
+      - name: Package as zip (.app 보존)
+        run: |
+          cd dist
+          ditto -c -k --keepParent YouTubeDownloader.app "YouTubeDownloader-macos-${{ matrix.arch }}.zip"
+          ls -la
+
+      - name: Upload artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouTubeDownloader-macos-${{ matrix.arch }}
+          path: dist/YouTubeDownloader-macos-${{ matrix.arch }}.zip
+
+      - name: Attach to Release (태그 푸시일 때만)
+        if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/YouTubeDownloader-macos-${{ matrix.arch }}.zip

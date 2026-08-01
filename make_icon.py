@@ -1,5 +1,6 @@
 """
-앱 아이콘 생성기 — icon.png (512) + icon.ico (멀티사이즈) 를 만듭니다.
+앱 아이콘 생성기 — icon.png (512) + icon.ico (Windows, 멀티사이즈)
++ icon.icns (macOS) 를 만듭니다.
 
 디자인: YouTube 레드 라운드 스퀘어 배경 + 흰색 다운로드 화살표(아래 방향, 플레이 느낌의
 뾰족한 촉) + 착지 트레이. "유튜브 영상을 내려받는다" 가 한눈에 읽히도록.
@@ -7,7 +8,13 @@
 사용:
     pip install pillow
     python make_icon.py
+
+.icns 는 macOS 의 iconutil 이 있으면 그걸로(가장 깨끗), 없으면 Pillow 로 저장합니다.
 """
+import os
+import shutil
+import subprocess
+import tempfile
 from PIL import Image, ImageDraw
 
 SS = 4  # 슈퍼샘플링 배수 (렌더 후 축소하여 안티에일리어싱)
@@ -80,15 +87,42 @@ def make(size):
     return img.resize((size, size), Image.LANCZOS)
 
 
+def make_icns(master):
+    """macOS .icns 생성. iconutil 이 있으면 .iconset → icns, 없으면 Pillow."""
+    # Apple 표준 iconset (사이즈, 파일명)
+    spec = [
+        (16, 'icon_16x16.png'), (32, 'icon_16x16@2x.png'),
+        (32, 'icon_32x32.png'), (64, 'icon_32x32@2x.png'),
+        (128, 'icon_128x128.png'), (256, 'icon_128x128@2x.png'),
+        (256, 'icon_256x256.png'), (512, 'icon_256x256@2x.png'),
+        (512, 'icon_512x512.png'), (1024, 'icon_512x512@2x.png'),
+    ]
+    if shutil.which('iconutil'):
+        with tempfile.TemporaryDirectory() as tmp:
+            iconset = os.path.join(tmp, 'icon.iconset')
+            os.makedirs(iconset)
+            for size, name in spec:
+                master.resize((size, size), Image.LANCZOS).save(os.path.join(iconset, name))
+            subprocess.run(['iconutil', '-c', 'icns', iconset, '-o', 'icon.icns'], check=True)
+        print('wrote icon.icns (iconutil)')
+    else:
+        sizes = [16, 32, 64, 128, 256, 512, 1024]
+        master.save('icon.icns', format='ICNS',
+                    append_images=[master.resize((s, s), Image.LANCZOS) for s in sizes])
+        print('wrote icon.icns (Pillow)')
+
+
 def main():
-    png = make(BASE)
-    png.save('icon.png')
+    make(BASE).save('icon.png')
     print('wrote icon.png (512x512)')
 
     sizes = [16, 24, 32, 48, 64, 128, 256]
     # 가장 큰 이미지에서 각 사이즈로 저장 (Pillow 가 요청 사이즈별 엔트리를 생성)
     make(256).save('icon.ico', format='ICO', sizes=[(s, s) for s in sizes])
     print('wrote icon.ico', sizes)
+
+    # macOS 용 고해상도 마스터(1024)에서 icns 생성
+    make_icns(make(1024))
 
 
 if __name__ == '__main__':
