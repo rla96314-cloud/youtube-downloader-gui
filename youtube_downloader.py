@@ -112,6 +112,7 @@ class DownloaderApp(ctk.CTk):
         self.subs_lang_var = tk.StringVar(value='ko,en')
 
         self._build_ui()
+        self._enable_clipboard_shortcuts()
         self.after(100, self._poll_queue)
 
         if yt_dlp is None:
@@ -133,6 +134,94 @@ class DownloaderApp(ctk.CTk):
                 return
         except Exception:
             pass
+
+    def _enable_clipboard_shortcuts(self):
+        """붙여넣기/복사/잘라내기를 확실히 지원합니다.
+
+        macOS 에서 한글 등 비-라틴 입력소스가 켜져 있으면 ⌘+V 의 keysym 이 달라져
+        Tk 기본 붙여넣기 바인딩이 동작하지 않는 문제가 있습니다. 그래서
+        (1) 키보드 레이아웃과 무관한 **우클릭 컨텍스트 메뉴** 를 기본 제공하고,
+        (2) ⌘/Ctrl 단축키도 위젯 레벨에서 직접(클립보드 수동) 처리합니다."""
+
+        def _del_sel(w):
+            try:
+                w.delete('sel.first', 'sel.last')
+            except Exception:
+                pass
+
+        def do_paste(w):
+            try:
+                text = self.clipboard_get()
+            except Exception:
+                return
+            try:
+                _del_sel(w)
+                w.insert('insert', text)
+            except Exception:
+                pass
+
+        def do_copy(w):
+            try:
+                sel = w.get('sel.first', 'sel.last')
+            except Exception:
+                sel = ''
+            if sel:
+                self.clipboard_clear()
+                self.clipboard_append(sel)
+
+        def do_cut(w):
+            do_copy(w)
+            _del_sel(w)
+
+        def do_select_all(w):
+            try:
+                if isinstance(w, tk.Text):
+                    w.tag_add('sel', '1.0', 'end-1c')
+                else:
+                    w.select_range(0, 'end')
+            except Exception:
+                pass
+
+        # 우클릭 컨텍스트 메뉴 (현재 위젯 대상)
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label='잘라내기', command=lambda: do_cut(self._ctx_widget))
+        menu.add_command(label='복사', command=lambda: do_copy(self._ctx_widget))
+        menu.add_command(label='붙여넣기', command=lambda: do_paste(self._ctx_widget))
+        menu.add_separator()
+        menu.add_command(label='전체 선택', command=lambda: do_select_all(self._ctx_widget))
+        self._ctx_widget = None
+
+        def popup(e):
+            self._ctx_widget = e.widget
+            try:
+                e.widget.focus_set()
+            except Exception:
+                pass
+            try:
+                menu.tk_popup(e.x_root, e.y_root)
+            finally:
+                menu.grab_release()
+            return 'break'
+
+        is_mac = sys.platform == 'darwin'
+
+        def wire(w):
+            # ⌘(mac)/Ctrl(그 외) 단축키 — 위젯 레벨 + break 로 기본동작 중복 방지
+            mod = 'Command' if is_mac else 'Control'
+            for keys, fn in (('vV', do_paste), ('cC', do_copy), ('xX', do_cut), ('aA', do_select_all)):
+                for k in keys:
+                    w.bind(f'<{mod}-{k}>', lambda e, f=fn: (f(e.widget), 'break')[1])
+            # 우클릭: mac 은 Button-2 / Control-클릭, 공통 Button-3
+            for seq in ('<Button-3>', '<Button-2>', '<Control-Button-1>'):
+                w.bind(seq, popup)
+
+        def walk(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, (tk.Entry, tk.Text)):
+                    wire(child)
+                walk(child)
+
+        walk(self)
 
     def _icon(self, name, size):
         """icons/<name>.png 를 CTkImage 로 로드 (없으면 None)."""
@@ -640,7 +729,11 @@ class DownloaderApp(ctk.CTk):
             'noplaylist': not playlist,
         }
         if prefer_h264 and not is_audio:
-            ydl_opts['format_sort'] = ['vcodec:h264', 'acodec:aac']
+            # 순서 주의: h264 선호(vcodec) → 해상도(res) → aac 선호(acodec).
+            # 예전엔 ['vcodec:h264','acodec:aac'] 라 acodec 이 res 보다 우선순위가 높아,
+            # 고해상도 영상전용 스트림 대신 저해상도 muxed(H.264+AAC) 스트림이 뽑혀
+            # 720p(영상에 따라 360p)로 떨어졌다. res 를 acodec 앞에 넣어 해결.
+            ydl_opts['format_sort'] = ['vcodec:h264', 'res', 'acodec:aac']
             if ffmpeg_ok:
                 ydl_opts['merge_output_format'] = 'mp4'
         _ff = ffmpeg_dir()
