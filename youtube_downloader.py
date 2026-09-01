@@ -24,6 +24,135 @@ try:
 except ImportError:
     Image = None
 
+# ── yt-dlp 자동 업데이트 ────────────────────────────────────────────
+# 번들된 yt-dlp 는 시간이 지나면 유튜브 변경으로 다운로드가 막힌다(HTTP 403 등).
+# 실행 시 PyPI 에서 최신 yt-dlp 휠(순수 파이썬)을 받아 사용자 폴더에 풀어 두고,
+# meta_path 파인더로 그 버전을 우선 import 한다(프리징된 내장본보다 우선).
+_YTDLP_UPDATED = False
+
+
+def _ytdlp_cache_dir():
+    if sys.platform == 'darwin':
+        base = os.path.expanduser('~/Library/Application Support/YouTubeDownloader')
+    elif os.name == 'nt':
+        base = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'),
+                            'YouTubeDownloader')
+    else:
+        base = os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'),
+                            'YouTubeDownloader')
+    return os.path.join(base, 'yt-dlp')
+
+
+def _ensure_latest_ytdlp(timeout=6):
+    """최신 yt-dlp 휠을 캐시에 준비하고 그 폴더 경로를 반환(없으면 None).
+    네트워크 부담을 줄이려 하루 1회만 온라인 확인한다."""
+    import ssl
+    import json
+    import shutil
+    import zipfile
+    import datetime
+    import urllib.request
+
+    cache = _ytdlp_cache_dir()
+    try:
+        os.makedirs(cache, exist_ok=True)
+    except Exception:
+        return None
+
+    # SSL 검증용 CA 번들 (python.org 파이썬/프리징 앱은 시스템 CA 가 없을 수 있어 certifi 사용).
+    # 코드를 내려받으므로 검증은 절대 끄지 않는다 — 실패 시 업데이트를 건너뛴다.
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        try:
+            ctx = ssl.create_default_context()
+        except Exception:
+            ctx = None
+
+    def _read(p):
+        try:
+            with open(p, encoding='utf-8') as f:
+                return f.read().strip()
+        except Exception:
+            return None
+
+    def _write(p, s):
+        try:
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write(s)
+        except Exception:
+            pass
+
+    installed = _read(os.path.join(cache, 'installed.txt'))
+    cur = os.path.join(cache, installed) if installed else None
+    have = bool(cur) and os.path.isdir(os.path.join(cur, 'yt_dlp'))
+    today = datetime.date.today().isoformat()
+
+    if have and _read(os.path.join(cache, 'last_check.txt')) == today:
+        return cur  # 오늘 이미 확인 → 네트워크 생략
+
+    try:
+        req = urllib.request.Request('https://pypi.org/pypi/yt-dlp/json',
+                                     headers={'User-Agent': 'YouTubeDownloader'})
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            data = json.load(r)
+        latest = data['info']['version']
+        wheel = next((u['url'] for u in data['urls'] if u['filename'].endswith('.whl')), None)
+        _write(os.path.join(cache, 'last_check.txt'), today)
+    except Exception:
+        return cur if have else None  # 오프라인 등 → 캐시본 사용
+
+    if not latest or not wheel or (installed == latest and have):
+        return cur if have else None
+
+    try:
+        tmp = os.path.join(cache, 'download.whl')
+        with urllib.request.urlopen(wheel, timeout=timeout, context=ctx) as r, open(tmp, 'wb') as f:
+            shutil.copyfileobj(r, f)
+        target = os.path.join(cache, latest)
+        tdir = target + '.tmp'
+        shutil.rmtree(tdir, ignore_errors=True)
+        with zipfile.ZipFile(tmp) as z:
+            z.extractall(tdir)          # 휠(zip)을 폴더로 추출
+        shutil.rmtree(target, ignore_errors=True)
+        os.replace(tdir, target)        # 원자적 교체
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        _write(os.path.join(cache, 'installed.txt'), latest)
+        return target
+    except Exception:
+        return cur if have else None
+
+
+def _activate_ytdlp_update():
+    """준비된 최신 yt-dlp 를 우선 import 하도록 meta_path 파인더를 설치."""
+    global _YTDLP_UPDATED
+    try:
+        d = _ensure_latest_ytdlp()
+    except Exception:
+        d = None
+    if not d or not os.path.isdir(os.path.join(d, 'yt_dlp')):
+        return
+    import importlib.abc
+    import importlib.machinery
+
+    class _YtdlpFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name == 'yt_dlp':
+                return importlib.machinery.PathFinder.find_spec(name, [d])
+            if name.startswith('yt_dlp.'):
+                return importlib.machinery.PathFinder.find_spec(name, path)
+            return None
+
+    sys.meta_path.insert(0, _YtdlpFinder())
+    _YTDLP_UPDATED = True
+
+
+_activate_ytdlp_update()
+
 try:
     import yt_dlp
 except ImportError:
@@ -113,6 +242,7 @@ class DownloaderApp(ctk.CTk):
 
         self._build_ui()
         self._enable_clipboard_shortcuts()
+        self._log_ytdlp_version()
         self.after(100, self._poll_queue)
 
         if yt_dlp is None:
@@ -132,6 +262,22 @@ class DownloaderApp(ctk.CTk):
                 self._icon_img = tk.PhotoImage(file=png)
                 self.iconphoto(True, self._icon_img)
                 return
+        except Exception:
+            pass
+
+    def _log_ytdlp_version(self):
+        """시작 시 사용 중인 yt-dlp 버전/출처를 로그에 남긴다(검증용 파일도 기록)."""
+        try:
+            if yt_dlp is None:
+                return
+            ver = getattr(getattr(yt_dlp, 'version', None), '__version__', '?')
+            src = '자동 최신화' if _YTDLP_UPDATED else '내장'
+            self._log(f'yt-dlp {ver} · {src}')
+            try:
+                with open(os.path.join(_ytdlp_cache_dir(), 'last_run.txt'), 'w', encoding='utf-8') as f:
+                    f.write(f'version={ver}\nfile={getattr(yt_dlp, "__file__", "?")}\nupdated={_YTDLP_UPDATED}\n')
+            except Exception:
+                pass
         except Exception:
             pass
 

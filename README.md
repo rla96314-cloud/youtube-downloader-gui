@@ -34,6 +34,19 @@ python youtube_downloader.py
 고화질 영상+오디오 병합 및 MP3 변환에는 [ffmpeg](https://ffmpeg.org/) 가 필요합니다.
 시스템 PATH 에 있거나, 실행파일과 같은 폴더(또는 PyInstaller 번들 안)에 `ffmpeg`(Windows 는 `ffmpeg.exe`)를 두면 자동 인식합니다.
 
+## yt-dlp 자동 업데이트
+
+번들된 yt-dlp 는 시간이 지나면 유튜브 변경으로 다운로드가 막힙니다(HTTP 403 등).
+그래서 **앱을 켤 때 PyPI 에서 최신 yt-dlp 를 받아 우선 사용**합니다 — 재빌드 없이도 최신 상태가 유지됩니다.
+
+- 최신 휠(순수 파이썬)을 사용자 폴더에 받아 두고, `meta_path` 파인더로 내장본보다 우선 import.
+  프리징된 실행파일에서도 내장 yt-dlp 를 제치고 최신본을 씁니다.
+- 네트워크 부담을 줄이려 **하루 1회만** 확인하며, 오프라인이면 마지막에 받아둔 버전(없으면 내장본)을 사용합니다.
+- SSL 인증은 번들된 `certifi` CA 로 검증합니다(코드를 받으므로 검증을 끄지 않음).
+- 캐시 위치: macOS `~/Library/Application Support/YouTubeDownloader/yt-dlp`,
+  Windows `%LOCALAPPDATA%\YouTubeDownloader\yt-dlp`. 이 폴더를 지우면 다음 실행 때 다시 받습니다.
+- 앱 시작 시 진행 로그에 현재 `yt-dlp <버전> · (자동 최신화|내장)` 이 표시됩니다.
+
 ## 단일 실행파일 빌드 (PyInstaller)
 
 ```bash
