@@ -1,7 +1,9 @@
 """
-YouTube Downloader - 단독 실행형 GUI 다운로더 (모던 UI / CustomTkinter)
+Video Downloader - YouTube · 치지직(CHZZK) · SOOP 단독 실행형 GUI 다운로더 (CustomTkinter)
 
 - 별도의 서버가 필요 없습니다. yt-dlp 라이브러리를 직접 호출합니다.
+- 치지직 다시보기/클립은 yt-dlp 내장 추출기가 현재(2026.08) ABR_HLS 영상에서 깨져 있어
+  (KeyError 'sourceURL'), 네이버 VOD 플레이백 API(JSON)를 직접 읽는 자체 추출기를 씁니다.
 - CustomTkinter 기반의 모던 GUI (둥근 카드 / 컬러 버튼).
 - PyInstaller 로 단일 실행파일(.exe / 바이너리)로 빌드할 수 있습니다.
 
@@ -12,7 +14,9 @@ YouTube Downloader - 단독 실행형 GUI 다운로더 (모던 UI / CustomTkinte
 ffmpeg 가 없으면 단일 포맷(병합 불필요) 다운로드만 사용됩니다.
 """
 import os
+import re
 import sys
+import json
 import threading
 import queue
 import tkinter as tk
@@ -158,7 +162,8 @@ try:
 except ImportError:
     yt_dlp = None
 
-APP_TITLE = 'YouTube Downloader'
+APP_TITLE = 'Video Downloader — YouTube · 치지직 · SOOP'
+APP_VERSION = '1.2.0'
 BG = '#EEF3FB'
 CARD = '#FFFFFF'
 HEADING = '#1F2A37'
@@ -192,6 +197,244 @@ def resource_path(name):
     return os.path.join(base, name)
 
 
+# ── 플랫폼 판별 ──────────────────────────────────────────────────────
+# (표시 이름, URL 정규식). 생방송 URL 은 별도로 걸러서 안내만 한다.
+PLATFORMS = [
+    ('YouTube', re.compile(r'(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/', re.I)),
+    ('치지직', re.compile(r'chzzk\.naver\.com/', re.I)),
+    ('SOOP', re.compile(r'(?:sooplive\.co\.kr|afreecatv\.com)/', re.I)),
+]
+LIVE_URL_RE = re.compile(
+    r'chzzk\.naver\.com/live/|play\.sooplive\.co\.kr/|play\.afreecatv\.com/', re.I)
+
+
+def detect_platform(url):
+    for name, rx in PLATFORMS:
+        if rx.search(url):
+            return name
+    return None
+
+
+# ── 치지직(CHZZK) 다시보기 / 클립 자체 추출기 ───────────────────────
+# yt-dlp 의 chzzk:video 는 vodStatus == 'ABR_HLS' 영상을 DASH(XML) 로 받아 파싱하다
+# KeyError('sourceURL') 로 죽는다 (yt-dlp#17063). 같은 엔드포인트가 Accept: application/json
+# 이면 JSON 을 주므로 그걸 직접 읽어 포맷 목록을 만들고, 다운로드/후처리는 yt-dlp 에 맡긴다.
+#   - video/mp4  : 단일 MP4(영상+음성, 짧은 영상에만 있음)
+#   - video/mp2t : HLS 미디어 플레이리스트(otherAttributes.m3u, 긴 다시보기는 이것만)
+#   - audio/mp4  : 음성 전용 단일 m4a (MP3 변환용)
+CHZZK_VIDEO_RE = re.compile(r'https?://(?:www\.|m\.)?chzzk\.naver\.com/(?:video|embed/vod)/(?P<id>\d+)', re.I)
+CHZZK_CLIP_RE = re.compile(r'https?://(?:www\.|m\.)?chzzk\.naver\.com/(?:clips|embed/clip)/(?P<id>[\w-]+)', re.I)
+CHZZK_API = 'https://api.chzzk.naver.com/service'
+NAVER_PLAYBACK = 'https://apis.naver.com/neonplayer/vodplay/v2/playback/'
+
+
+class ChzzkError(Exception):
+    """사용자에게 그대로 보여줄 치지직 추출 오류 (성인 인증 등)."""
+
+
+def _ydl_json(ydl, url, query=None):
+    """yt-dlp 의 네트워크 스택(쿠키/프록시 포함)으로 JSON 을 받는다."""
+    from urllib.parse import urlencode
+    from yt_dlp.networking import Request
+    if query:
+        url = f'{url}?{urlencode(query)}'
+    req = Request(url, headers={
+        'Accept': 'application/json',
+        'Referer': 'https://chzzk.naver.com/',
+        'Origin': 'https://chzzk.naver.com',
+    })
+    with ydl.urlopen(req) as resp:
+        return json.loads(resp.read().decode('utf-8', 'replace'))
+
+
+def _ensure_nnb_cookie(ydl):
+    """api.chzzk.naver.com 의 AES 키 엔드포인트는 네이버 기기식별 쿠키 `NNB` 가 없으면 403 을 준다.
+    (값은 아무거나 OK — 실측) 브라우저 쿠키를 쓰는 중이면 진짜 값이 있으니 건드리지 않는다."""
+    import http.cookiejar
+    import random
+    import string
+    for c in ydl.cookiejar:
+        if c.name == 'NNB' and 'naver.com' in (c.domain or ''):
+            return
+    val = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+    ydl.cookiejar.set_cookie(http.cookiejar.Cookie(
+        0, 'NNB', val, None, False, '.naver.com', True, True, '/', True,
+        True, None, True, None, None, {}))  # discard=True → cookies.txt 에 저장되지 않음
+
+
+def _ydl_bytes(ydl, url, referer):
+    from yt_dlp.networking import Request
+    with ydl.urlopen(Request(url, headers={'Referer': referer})) as resp:
+        return resp.read()
+
+
+def _chzzk_hls_format(ydl, rep, m3u, referer, tmpdir, common):
+    """HLS 표현(video/mp2t) 하나를 yt-dlp 포맷으로.
+
+    원본 m3u8 는 그대로 못 쓴다:
+      - 짧은 다시보기: 세그먼트 줄에 서명 쿼리(`?_lsu_sa_=…`)가 빠져 있어 404 → DASH segmentTemplate 의 쿼리를 붙인다
+      - 긴 다시보기(AES): 키 URL 이 NNB 쿠키+Referer 를 요구 → 키를 미리 받아 data: URI 로 심는다
+    그래서 플레이리스트를 로컬 파일로 재작성해 file: URL 로 넘긴다. 네이티브 HLS 다운로더는
+    `hls_media_playlist_data` 로 내용을 직접 받고, 구간 잘라받기(ffmpeg) 는 file: 입력을 읽는다
+    (yt-dlp 가 -protocol_whitelist 를 붙여 준다; `enable_file_urls` 필요).
+    """
+    import pathlib
+    from urllib.parse import urljoin, urlsplit
+    text = _ydl_bytes(ydl, m3u, referer).decode('utf-8', 'replace')
+    media_tpl = ((rep.get('segmentTemplate') or {}).get('media')) or ''
+    seg_query = urlsplit(media_tpl).query  # '_lsu_sa_=…' 또는 ''
+    out = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith('#EXT-X-KEY') and 'URI="' in s:
+            uri = re.search(r'URI="([^"]+)"', s).group(1)
+            key = _ydl_bytes(ydl, urljoin(m3u, uri), referer)
+            if len(key) != 16:
+                raise ChzzkError(f'AES 키를 받지 못했습니다 ({len(key)} bytes).')
+            # 키를 로컬 파일로 두고 절대 file:// URI 로 가리킨다.
+            #  - 네이티브: 절대 URI 는 urljoin 을 건너뛰고 그대로 urlopen (enable_file_urls)
+            #  - ffmpeg: -protocol_whitelist file + -allowed_extensions ALL 로 읽음
+            #  (data: URI 는 네이티브 urljoin 이 None 을 주고, hls_aes.key 를 쓰면 ffmpeg 구간컷이 막혀 둘 다 탈락)
+            key_path = os.path.join(tmpdir, f"{rep.get('id') or common.get('height')}.key")
+            with open(key_path, 'wb') as kf:
+                kf.write(key)
+            s = s.replace(f'URI="{uri}"', f'URI="{pathlib.Path(key_path).as_uri()}"')
+        elif s.startswith('#EXT-X-MAP') and 'URI="' in s:
+            uri = re.search(r'URI="([^"]+)"', s).group(1)
+            s = s.replace(f'URI="{uri}"', f'URI="{urljoin(m3u, uri)}"')
+        elif not s.startswith('#'):
+            s = urljoin(m3u, s)
+            if seg_query and '?' not in s:
+                s = f'{s}?{seg_query}'
+        out.append(s)
+    content = '\n'.join(out) + '\n'
+    path = os.path.join(tmpdir, f"{rep.get('id') or common.get('height')}.m3u8")
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(content)
+    return {
+        'format_id': f"hls-{common.get('height')}p",
+        'url': pathlib.Path(path).as_uri(),
+        'hls_media_playlist_data': content,
+        'ext': 'mp4',
+        'protocol': 'm3u8_native',
+        'downloader_options': {'ffmpeg_args': ['-allowed_extensions', 'ALL']},
+        **common,
+    }
+
+
+def _chzzk_formats(ydl, playback, referer):
+    import tempfile
+    tmpdir = None
+    formats = []
+    for period in playback.get('period') or []:
+        for aset in period.get('adaptationSet') or []:
+            mime = aset.get('mimeType') or ''
+            for rep in aset.get('representation') or []:
+                base = ((rep.get('baseURL') or [{}])[0] or {}).get('value')
+                codecs = [c.strip() for c in (rep.get('codecs') or '').split(',') if c.strip()]
+                acodec = next((c for c in codecs if c.startswith('mp4a')), None)
+                vcodec = next((c for c in codecs if not c.startswith('mp4a')), None)
+                height = rep.get('height')
+                bw = rep.get('bandwidth')
+                common = {
+                    'width': rep.get('width'),
+                    'height': height,
+                    'tbr': bw / 1000 if bw else None,
+                    'vcodec': vcodec or 'avc1',
+                    'acodec': acodec or 'mp4a.40.2',
+                }
+                try:
+                    common['fps'] = int(float(rep.get('frameRate'))) if rep.get('frameRate') else None
+                except ValueError:
+                    common['fps'] = None
+                if mime == 'video/mp4' and base:
+                    # 단일 MP4 (영상+음성) — 짧은 다시보기/클립에만 있음.
+                    # CDN 이 이 URL 은 재생 속도 근처로 쓰로틀링해서(실측 144p 0.16MB/s) HLS 보다 훨씬 느리다
+                    # → preference 를 낮춰 같은 화질의 HLS 가 먼저 뽑히게 하고, 폴백으로만 남긴다.
+                    formats.append({
+                        'format_id': f'http-{height}p', 'url': base, 'ext': 'mp4',
+                        'protocol': 'https', 'preference': -1, **common,
+                    })
+                elif mime == 'video/mp2t':
+                    m3u = (rep.get('otherAttributes') or {}).get('m3u')
+                    if not m3u:
+                        continue
+                    if tmpdir is None:
+                        tmpdir = tempfile.mkdtemp(prefix='chzzk-hls-')
+                    formats.append(_chzzk_hls_format(ydl, rep, m3u, referer, tmpdir, common))
+                elif mime.startswith('audio/') and base:
+                    # 음성 전용 단일 m4a (byte-range 세그먼트지만 파일 하나) — MP3 변환용
+                    formats.append({
+                        'format_id': 'audio', 'url': base, 'ext': 'm4a', 'protocol': 'https',
+                        'vcodec': 'none', 'acodec': acodec or 'mp4a.40.2',
+                        'asr': rep.get('audioSamplingRate'), 'tbr': common['tbr'],
+                    })
+    return formats
+
+
+def chzzk_extract(ydl, url):
+    """치지직 다시보기/클립 URL → yt-dlp info dict. 해당 URL 이 아니면 None.
+    (실패 시 예외 → 호출 측에서 yt-dlp 내장 추출기로 폴백)"""
+    m = CHZZK_VIDEO_RE.match(url)
+    if m:
+        vid = m.group('id')
+        meta = (_ydl_json(ydl, f'{CHZZK_API}/v3/videos/{vid}') or {}).get('content') or {}
+        if not meta:
+            raise ChzzkError('영상 정보를 가져올 수 없습니다 (삭제됐거나 비공개 영상).')
+        channel = meta.get('channel') or {}
+        info = {
+            'id': vid,
+            'title': meta.get('videoTitle') or vid,
+            'thumbnail': meta.get('thumbnailImageUrl'),
+            'duration': meta.get('duration'),
+            'view_count': meta.get('readCount'),
+            'channel': channel.get('channelName'),
+            'channel_id': channel.get('channelId'),
+            'uploader': channel.get('channelName'),
+            'live_status': 'was_live' if meta.get('liveOpenDate') else 'not_live',
+        }
+        if meta.get('publishDateAt'):
+            info['timestamp'] = meta['publishDateAt'] / 1000
+    else:
+        m = CHZZK_CLIP_RE.match(url)
+        if not m:
+            return None
+        cid = m.group('id')
+        meta = (_ydl_json(ydl, f'{CHZZK_API}/v1/play-info/clip/{cid}') or {}).get('content') or {}
+        if not meta:
+            raise ChzzkError('클립 정보를 가져올 수 없습니다 (삭제됐거나 비공개 클립).')
+        owner = meta.get('ownerChannel') or {}
+        info = {
+            'id': cid,
+            'title': meta.get('contentTitle') or cid,
+            'channel': owner.get('channelName'),
+            'channel_id': owner.get('channelId'),
+            'uploader': owner.get('channelName'),
+            'view_count': meta.get('readCount'),
+        }
+
+    video_id, in_key = meta.get('videoId'), meta.get('inKey')
+    if not video_id or not in_key:
+        if meta.get('adult'):
+            raise ChzzkError('성인 인증이 필요한 영상입니다. 옵션에서 네이버에 로그인된 브라우저 쿠키를 지정하세요.')
+        raise ChzzkError(f"재생 정보가 없습니다 (vodStatus={meta.get('vodStatus')}).")
+
+    _ensure_nnb_cookie(ydl)
+    playback = _ydl_json(ydl, NAVER_PLAYBACK + video_id,
+                         {'key': in_key, 'env': 'real', 'lc': 'ko_KR', 'cpl': 'ko_KR'})
+    formats = _chzzk_formats(ydl, playback, referer=url)
+    if not formats:
+        raise ChzzkError('재생 가능한 포맷을 찾지 못했습니다.')
+    info.update({
+        'formats': formats,
+        'webpage_url': url,
+        'http_headers': {'Referer': 'https://chzzk.naver.com/'},
+    })
+    return info
+
+
 class DownloaderApp(ctk.CTk):
     """CustomTkinter 기반 메인 윈도우."""
 
@@ -210,13 +453,24 @@ class DownloaderApp(ctk.CTk):
         ('영상에 입히기', 'embed'),
     ]
 
+    # 로그인 쿠키 옵션: (표시 이름, 내부 값) — 성인 인증/구독자 전용 영상용.
+    # 브라우저 이름은 yt-dlp `cookiesfrombrowser` 값, 'file' 은 cookies.txt 파일.
+    COOKIE_OPTIONS = [
+        ('사용 안 함', None),
+        ('Chrome', 'chrome'),
+        ('Edge', 'edge'),
+        ('Whale', 'whale'),
+        ('Firefox', 'firefox'),
+        ('쿠키 파일(cookies.txt)', 'file'),
+    ]
+
     def __init__(self):
         super().__init__()
         ctk.set_appearance_mode('light')
         ctk.set_default_color_theme('blue')
         self.title(APP_TITLE)
-        self.geometry('760x720')
-        self.minsize(680, 640)
+        self.geometry('760x790')
+        self.minsize(680, 700)
         self.configure(fg_color=BG)
         self._set_window_icon()
 
@@ -239,6 +493,8 @@ class DownloaderApp(ctk.CTk):
         self.clip_end_var = tk.StringVar(value='')
         self.subs_var = tk.StringVar(value=self.SUBS_OPTIONS[0][0])
         self.subs_lang_var = tk.StringVar(value='ko,en')
+        self.cookie_var = tk.StringVar(value=self.COOKIE_OPTIONS[0][0])
+        self.cookie_file_var = tk.StringVar(value='')
 
         self._build_ui()
         self._enable_clipboard_shortcuts()
@@ -272,7 +528,7 @@ class DownloaderApp(ctk.CTk):
                 return
             ver = getattr(getattr(yt_dlp, 'version', None), '__version__', '?')
             src = '자동 최신화' if _YTDLP_UPDATED else '내장'
-            self._log(f'yt-dlp {ver} · {src}')
+            self._log(f'Video Downloader v{APP_VERSION} · yt-dlp {ver} ({src}) · YouTube / 치지직 / SOOP')
             try:
                 with open(os.path.join(_ytdlp_cache_dir(), 'last_run.txt'), 'w', encoding='utf-8') as f:
                     f.write(f'version={ver}\nfile={getattr(yt_dlp, "__file__", "?")}\nupdated={_YTDLP_UPDATED}\n')
@@ -426,7 +682,9 @@ class DownloaderApp(ctk.CTk):
             text_color=HEADING,
         )
         self.url_text.pack(fill='x', padx=18, pady=(8, 16))
-        self._add_placeholder(self.url_text, '여기에 YouTube 동영상 URL을 입력하세요…')
+        self._add_placeholder(
+            self.url_text,
+            'YouTube · 치지직(다시보기/클립) · SOOP(다시보기/클립) URL을 입력하세요…')
 
         # ── 옵션 카드 ───────────────────────────────────────────────
         card_opt = self._card(outer)
@@ -608,6 +866,57 @@ class DownloaderApp(ctk.CTk):
         )
         self.playlist_check.grid(row=5, column=1, columnspan=2, sticky='w', pady=(2, 4))
 
+        # ── 로그인 쿠키 (성인 인증 / 구독자 전용) ──────────────────
+        ctk.CTkLabel(
+            grid,
+            text='  로그인 쿠키',
+            font=self.font_label,
+            text_color=HEADING,
+            image=self._icon('folder_blue', 20),
+            compound='left',
+        ).grid(row=6, column=0, sticky='w', pady=8, padx=(0, 14))
+        cookie_row = ctk.CTkFrame(grid, fg_color='transparent')
+        cookie_row.grid(row=6, column=1, columnspan=2, sticky='ew', pady=8)
+        self.cookie_menu = ctk.CTkComboBox(
+            cookie_row,
+            variable=self.cookie_var,
+            values=[o[0] for o in self.COOKIE_OPTIONS],
+            font=self.font_body,
+            height=42,
+            width=200,
+            corner_radius=10,
+            state='readonly',
+            fg_color='#FFFFFF',
+            text_color=HEADING,
+            border_color=BORDER,
+            button_color='#FFFFFF',
+            button_hover_color='#EEF3FB',
+            dropdown_fg_color='#FFFFFF',
+            dropdown_text_color=HEADING,
+            dropdown_hover_color='#EAF1FB',
+            command=lambda _=None: self._sync_option_states(),
+        )
+        self.cookie_menu.pack(side='left')
+        self.cookie_file_btn = ctk.CTkButton(
+            cookie_row,
+            text='파일…',
+            width=70,
+            height=42,
+            corner_radius=10,
+            font=self.font_label,
+            fg_color='#FFFFFF',
+            text_color=ACCENT,
+            border_width=1,
+            border_color='#D8E3F5',
+            hover_color='#F2F6FF',
+            command=self._choose_cookie_file,
+        )
+        self.cookie_file_btn.pack(side='left', padx=(10, 0))
+        self.cookie_hint = ctk.CTkLabel(
+            cookie_row, text='  성인 인증·구독자 전용 영상일 때만', font=self.font_body, text_color=SUBTLE
+        )
+        self.cookie_hint.pack(side='left', padx=(8, 0))
+
         self._sync_option_states()
 
         # ── 버튼 ────────────────────────────────────────────────────
@@ -711,9 +1020,16 @@ class DownloaderApp(ctk.CTk):
             "1) 동영상 URL 을 입력합니다 (여러 개는 줄바꿈으로 구분).\n"
             "2) 저장 폴더와 화질/형식을 선택합니다.\n"
             "3) [다운로드 시작] 을 누릅니다.\n\n"
+            "지원 사이트\n"
+            "• YouTube — 영상 / 재생목록 / 쇼츠\n"
+            "• 치지직 — 다시보기(chzzk.naver.com/video/…) / 클립(chzzk.naver.com/clips/…)\n"
+            "• SOOP — 다시보기·클립(vod.sooplive.co.kr/player/…)\n"
+            "  (생방송 녹화는 지원하지 않습니다. 다시보기 URL 을 넣어 주세요.)\n\n"
             "• 기본은 H.264(MP4) 우선이라 호환성이 좋습니다 (보통 최대 1080p).\n"
             "• 4K 등 초고화질이 필요하면 'AV1/VP9 허용' 을 체크하세요.\n"
-            "• '음성만 (MP3)' 으로 오디오만 추출할 수 있습니다.",
+            "• '음성만 (MP3)' 으로 오디오만 추출할 수 있습니다.\n"
+            "• 성인 인증·구독자 전용 영상은 '로그인 쿠키' 에서 로그인된 브라우저를 고르세요.\n"
+            "  (Chrome 이 안 되면 Firefox 나 cookies.txt 파일을 써 보세요.)",
         )
 
     def _choose_folder(self):
@@ -738,6 +1054,29 @@ class DownloaderApp(ctk.CTk):
         clip_on = self.clip_var.get()
         self.clip_start_entry.configure(state='normal' if clip_on else 'disabled')
         self.clip_end_entry.configure(state='normal' if clip_on else 'disabled')
+        # 쿠키 파일 선택 버튼은 '쿠키 파일' 모드에서만
+        mode = self._current_cookie_mode()
+        self.cookie_file_btn.configure(state='normal' if mode == 'file' else 'disabled')
+        if mode == 'file':
+            path = self.cookie_file_var.get()
+            self.cookie_hint.configure(text=f'  {os.path.basename(path)}' if path else '  cookies.txt 파일을 선택하세요')
+        elif mode:
+            self.cookie_hint.configure(text=f'  {self.cookie_var.get()} 에 네이버/SOOP 로그인이 되어 있어야 합니다')
+        else:
+            self.cookie_hint.configure(text='  성인 인증·구독자 전용 영상일 때만')
+
+    def _current_cookie_mode(self):
+        label = self.cookie_var.get()
+        return next((mode for name, mode in self.COOKIE_OPTIONS if name == label), None)
+
+    def _choose_cookie_file(self):
+        path = filedialog.askopenfilename(
+            title='cookies.txt 선택',
+            filetypes=[('쿠키 파일', '*.txt'), ('모든 파일', '*.*')],
+        )
+        if path:
+            self.cookie_file_var.set(path)
+        self._sync_option_states()
 
     @staticmethod
     def _fmt_secs(sec):
@@ -795,11 +1134,18 @@ class DownloaderApp(ctk.CTk):
             clip = (start if start is not None else 0.0,
                     end if end is not None else float('inf'))
 
+        cookie_mode = self._current_cookie_mode()
+        cookie_file = self.cookie_file_var.get().strip()
+        if cookie_mode == 'file' and not os.path.isfile(cookie_file):
+            messagebox.showwarning(APP_TITLE, "'쿠키 파일' 을 골랐다면 cookies.txt 파일을 선택하세요.")
+            return
+
         extra = {
             'playlist': self.playlist_var.get(),
             'clip': clip,
             'subs': self._current_subs_mode(),
             'subs_langs': self.subs_lang_var.get(),
+            'cookies': (cookie_mode, cookie_file),
         }
 
         self.cancel_flag.clear()
@@ -869,11 +1215,25 @@ class DownloaderApp(ctk.CTk):
             'progress_hooks': [hook],
             'noprogress': True,
             'ignoreerrors': False,
-            'restrictfilenames': True,
+            # restrictfilenames 는 한글을 전부 '_' 로 바꿔 '피파랜드 (part 1)' → 'part_1' 이 되고
+            # 같은 이름끼리 덮어쓰기/건너뛰기가 난다. 한글은 살리고 Windows 금지문자만 치환.
+            'restrictfilenames': False,
+            'windowsfilenames': True,
+            # 치지직 HLS 는 재작성한 로컬 플레이리스트(file:)를 ffmpeg 에 넘긴다 (_chzzk_hls_format 참고)
+            'enable_file_urls': True,
+            # HLS 조각을 병렬로 받아 속도 확보 (치지직/SOOP 다시보기는 전부 HLS)
+            'concurrent_fragment_downloads': 6,
             'quiet': True,
             'no_warnings': True,
             'noplaylist': not playlist,
         }
+        cookie_mode, cookie_file = (extra or {}).get('cookies') or (None, '')
+        if cookie_mode == 'file' and cookie_file:
+            ydl_opts['cookiefile'] = cookie_file
+            self.msg_queue.put(('log', f'쿠키: 파일 {os.path.basename(cookie_file)}'))
+        elif cookie_mode:
+            ydl_opts['cookiesfrombrowser'] = (cookie_mode,)
+            self.msg_queue.put(('log', f'쿠키: {cookie_mode} 브라우저에서 읽기'))
         if prefer_h264 and not is_audio:
             # 순서 주의: h264 선호(vcodec) → 해상도(res) → aac 선호(acodec).
             # 예전엔 ['vcodec:h264','acodec:aac'] 라 acodec 이 res 보다 우선순위가 높아,
@@ -930,10 +1290,18 @@ class DownloaderApp(ctk.CTk):
             for idx, url in enumerate(urls, 1):
                 if self.cancel_flag.is_set():
                     break
-                self.msg_queue.put(('log', f'[{idx}/{total_count}] {url}'))
+                platform = detect_platform(url)
+                self.msg_queue.put(('log', f'[{idx}/{total_count}] {(platform + " · ") if platform else ""}{url}'))
                 self.msg_queue.put(('progress', 0))
+                if LIVE_URL_RE.search(url):
+                    self.msg_queue.put(('log', '   ✗ 생방송 URL 은 지원하지 않습니다. 다시보기/클립 URL 을 넣어 주세요.'))
+                    continue
                 try:
-                    info = ydl.extract_info(url, download=True)
+                    info = None
+                    if platform == '치지직':
+                        info = self._download_chzzk(ydl, url)
+                    if info is None:
+                        info = ydl.extract_info(url, download=True)
                     if info is not None:
                         title = info.get('title', url)
                         self.msg_queue.put(('log', f'   ✓ 완료: {title}'))
@@ -945,6 +1313,8 @@ class DownloaderApp(ctk.CTk):
                         self.msg_queue.put(('log', '   ■ 취소됨'))
                         break
                     self.msg_queue.put(('log', f'   ✗ 오류: {e}'))
+                except ChzzkError as e:
+                    self.msg_queue.put(('log', f'   ✗ 치지직: {e}'))
                 except Exception as e:
                     self.msg_queue.put(('log', f'   ✗ 오류: {e}'))
 
@@ -953,6 +1323,25 @@ class DownloaderApp(ctk.CTk):
         else:
             done_msg = f'완료: {success}/{total_count} 개 다운로드'
         self.msg_queue.put(('done', done_msg))
+
+    def _download_chzzk(self, ydl, url):
+        """치지직 다시보기/클립을 자체 추출기로 받는다. 자체 추출이 불가능하면 None
+        (→ 호출 측이 yt-dlp 내장 추출기로 시도). 사용자용 오류는 ChzzkError 로 전파."""
+        try:
+            ie_result = chzzk_extract(ydl, url)
+        except ChzzkError:
+            raise
+        except Exception as e:  # 네트워크/API 변경 등 → 내장 추출기로 폴백
+            self.msg_queue.put(('log', f'   · 자체 추출 실패({e.__class__.__name__}), yt-dlp 내장 추출기로 재시도'))
+            return None
+        if ie_result is None:
+            return None
+        ie = ydl.get_info_extractor('CHZZKVideo')
+        ydl.add_default_extra_info(ie_result, ie, url)
+        n_hls = sum(1 for f in ie_result['formats'] if f.get('protocol') == 'm3u8_native')
+        n_http = sum(1 for f in ie_result['formats'] if f.get('ext') == 'mp4' and f.get('protocol') == 'https')
+        self.msg_queue.put(('log', f"   · 치지직: {ie_result.get('title')}  (MP4 {n_http}개 · HLS {n_hls}개)"))
+        return ydl.process_ie_result(ie_result, download=True)
 
     def _poll_queue(self):
         try:

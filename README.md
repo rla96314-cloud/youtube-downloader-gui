@@ -1,8 +1,38 @@
-# YouTube Downloader (GUI)
+# Video Downloader (GUI) — YouTube · 치지직 · SOOP
 
-단독 실행형 YouTube 다운로더 데스크톱 앱. 별도 서버 없이 [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+단독 실행형 동영상 다운로더 데스크톱 앱. 별도 서버 없이 [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 라이브러리를 직접 호출하고, [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter)
 기반의 모던 GUI(둥근 카드 / 컬러 버튼)를 제공합니다.
+
+## 지원 사이트
+
+| 사이트 | 지원 URL | 비고 |
+|---|---|---|
+| **YouTube** | 영상 · 쇼츠 · 재생목록 | yt-dlp 내장 |
+| **치지직** | 다시보기 `chzzk.naver.com/video/{번호}` · 클립 `chzzk.naver.com/clips/{ID}` | **자체 추출기** (아래 참고) |
+| **SOOP** | 다시보기·클립 `vod.sooplive.co.kr/player/{번호}` (여러 파트면 `(part N)` 로 나눠 저장) | yt-dlp 내장 (`soop`) |
+
+생방송(`chzzk.naver.com/live/…`, `play.sooplive.co.kr/…`) 녹화는 지원하지 않습니다 — 다시보기 URL 을 넣어 주세요.
+성인 인증·구독자 전용 영상은 **로그인 쿠키** 옵션에서 네이버/SOOP 에 로그인된 브라우저(Chrome/Edge/Whale/Firefox)나
+`cookies.txt` 파일을 고르면 됩니다. (Windows 의 Chrome 은 쿠키 암호화 때문에 못 읽는 경우가 있어요 → Firefox 나 cookies.txt 권장)
+
+### 치지직 자체 추출기를 쓰는 이유
+
+yt-dlp 의 `chzzk:video` 는 2026.08 현재 `vodStatus == ABR_HLS` 인 다시보기에서 `KeyError('sourceURL')` 로 죽습니다
+([yt-dlp#17063](https://github.com/yt-dlp/yt-dlp/issues/17063)). 그래서 네이버 VOD 플레이백 API 를 직접 읽습니다:
+
+- `api.chzzk.naver.com/service/v3/videos/{번호}` (클립은 `v1/play-info/clip/{ID}`) → `videoId` + `inKey`
+- `apis.naver.com/neonplayer/vodplay/v2/playback/{videoId}?key=…` 를 **`Accept: application/json`** 으로 받으면 DASH 대신 JSON 이 옴
+  - `video/mp4` : 단일 MP4(영상+음성). 짧은 영상/클립에만 있고, CDN 이 재생속도 근처로 쓰로틀링해서 느림 → 폴백용
+  - `video/mp2t` : 화질별 HLS 미디어 플레이리스트(`otherAttributes.m3u`). 긴 다시보기는 이것만 있음
+  - `audio/mp4` : 음성 전용 m4a (MP3 변환용)
+- HLS 플레이리스트는 그대로 못 써서 **로컬 파일로 재작성**해 `file:` URL 로 넘깁니다
+  - 짧은 다시보기: 세그먼트 줄에 서명 쿼리(`?_lsu_sa_=…`)가 빠져 있어 404 → DASH `segmentTemplate.media` 의 쿼리를 붙임
+  - 긴 다시보기(AES-128): 키 URL(`…/encryption/videos/{videoId}/aes_key`)이 **`NNB` 쿠키 + Referer** 없으면 403
+    (값은 아무거나 OK) → 키를 미리 받아 로컬 `.key` 파일로 두고 절대 `file://` URI 로 가리킴
+  - 네이티브 HLS 다운로더는 `hls_media_playlist_data` 로 내용을 받고, 구간 잘라받기는 ffmpeg 가 `file:` 입력을 읽음
+    (`enable_file_urls` + `-allowed_extensions ALL`)
+- 다운로드/병합/MP3/구간/자막 후처리는 전부 yt-dlp 에 맡깁니다. 자체 추출이 실패하면 yt-dlp 내장 추출기로 재시도합니다.
 
 > 이 저장소의 소스는 배포된 `YouTubeDownloader.exe`(PyInstaller 단일 실행파일, Python 3.12)를
 > 역어셈블하여 원본과 동일하게 복원한 것입니다.
@@ -21,7 +51,10 @@
 - **구간 잘라받기** ✂ — 시작~끝 시간(`90` · `1:30` · `1:02:03`)만 잘라서 저장 (빈칸이면 처음/끝까지). 키프레임 정렬로 정확히 컷
 - **재생목록 전체 받기** 📚 — 재생목록 URL 을 통째로. `재생목록이름/순번. 제목` 형태로 하위폴더 저장
 - **자막** 💬 — 자막 파일(SRT) 별도 저장 / 영상에 입히기(내장) 선택, 언어 코드 지정(기본 `ko,en`, 자동생성 자막 포함)
+- **로그인 쿠키** 🍪 — 브라우저(Chrome/Edge/Whale/Firefox) 쿠키 또는 `cookies.txt` 로 성인 인증·구독자 전용 영상
 - 저장 폴더 선택, 진행 로그
+- 파일명은 한글 그대로 저장 (Windows 금지문자만 치환). v1.1 까지는 `restrictfilenames` 라 한글이 전부 `_` 로 바뀌었음
+- HLS 조각 6개 병렬 다운로드
 - ffmpeg 가 없으면 자동으로 병합 불필요 단일 포맷으로 대체 (구간/자막 입히기도 ffmpeg 필요)
 
 ## 설치 & 실행
@@ -85,7 +118,7 @@ pyinstaller --noconfirm --onefile --windowed \
 PyInstaller 는 크로스 컴파일이 안 되므로 Windows exe 는 이 워크플로(또는 실제 Windows PC)에서만 만들 수 있습니다.
 
 - **수동 실행**: 저장소 → Actions → *Build Windows EXE* → *Run workflow* → 완료 후 Artifacts 에서 `YouTubeDownloader.exe` 다운로드
-- **릴리스**: `git tag v1.1.0 && git push origin v1.1.0` → 빌드 후 해당 태그 Release 에 exe 자동 첨부
+- **릴리스**: `git tag v1.2.0 && git push origin v1.2.0` → 빌드 후 해당 태그 Release 에 exe 자동 첨부
 
 `.github/workflows/build-macos.yml` 은 **macOS 러너에서 `.app` 을 자동 빌드**합니다
 (Apple Silicon `arm64` + Intel `x86_64` 둘 다, ffmpeg 정적 바이너리 자동 번들, `.zip` 으로 패키징).
@@ -99,7 +132,7 @@ PyInstaller 는 크로스 컴파일이 안 되므로 Windows exe 는 이 워크�
 ## 프로젝트 구조
 
 ```
-youtube_downloader.py   # 앱 전체 (단일 파일)
+youtube_downloader.py   # 앱 전체 (단일 파일: GUI + 치지직 자체 추출기)
 make_icon.py            # 프로그램 아이콘 생성기 (icon.png / icon.ico / icon.icns)
 icon.png / icon.ico / icon.icns  # 프로그램 아이콘 (창 / Windows exe / macOS app)
 icons/                  # UI 아이콘 (link, gear, folder, video, download, activity, help, folder_blue)
