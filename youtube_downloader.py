@@ -163,7 +163,7 @@ except ImportError:
     yt_dlp = None
 
 APP_TITLE = 'Video Downloader — YouTube · 치지직 · SOOP'
-APP_VERSION = '1.2.0'
+APP_VERSION = '1.2.1'
 BG = '#EEF3FB'
 CARD = '#FFFFFF'
 HEADING = '#1F2A37'
@@ -419,7 +419,11 @@ def chzzk_extract(ydl, url):
     if not video_id or not in_key:
         if meta.get('adult'):
             raise ChzzkError('성인 인증이 필요한 영상입니다. 옵션에서 네이버에 로그인된 브라우저 쿠키를 지정하세요.')
-        raise ChzzkError(f"재생 정보가 없습니다 (vodStatus={meta.get('vodStatus')}).")
+        vod_status = meta.get('vodStatus')
+        if vod_status in (None, 'NONE'):
+            # 방송 종료 직후: 다시보기 인코딩이 끝나기 전까지 inKey 가 비어 있다 (실측).
+            raise ChzzkError('다시보기가 아직 준비 중입니다 (방송 종료 후 인코딩 중). 잠시 후 다시 시도하세요.')
+        raise ChzzkError(f"재생 정보가 없습니다 (vodStatus={vod_status}).")
 
     _ensure_nnb_cookie(ydl)
     playback = _ydl_json(ydl, NAVER_PLAYBACK + video_id,
@@ -1252,10 +1256,32 @@ class DownloaderApp(ctk.CTk):
                 {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}
             )
 
-        # 구간 잘라받기
+        # 구간 잘라받기 — 구간은 '전체 영상 타임라인' 기준이다.
+        # SOOP 다시보기처럼 한 영상이 여러 파트(multi_video)로 쪼개져 오면 yt-dlp 는 파트마다
+        # 같은 구간을 잘라 버린다(실측: 0~10초 요청 → 파트 3개 전부 10초짜리). 그래서 파트별
+        # 누적 오프셋으로 로컬 구간을 계산하고, 구간이 안 걸치는 파트는 빈 목록(=건너뜀)을 준다.
+        clip_offsets = {}  # playlist_id -> [파트별 시작 오프셋(초)] (_prepare_clip_offsets 가 채움)
+
+        def clip_ranges(info, _ydl):
+            if info.get('app_windowed'):
+                # 세그먼트 창으로 이미 잘라낸 파트(_hls_window_formats): 구간 지정을 빼서
+                # yt-dlp 가 ffmpeg -ss 대신 네이티브 HLS 다운로더를 쓰게 한다. 잔여 컷은 후처리기가.
+                return [{}]
+            s, e = clip
+            offs = clip_offsets.get(info.get('playlist_id'))
+            if not offs:  # 단일 영상 (또는 오프셋 미계산) → 그대로
+                return [{'start_time': s, 'end_time': e}]
+            i = (info.get('playlist_index') or 1) - 1
+            off = offs[i] if i < len(offs) else 0
+            dur = info.get('duration')
+            part_end = off + dur if dur else float('inf')
+            lo, hi = max(s, off), min(e, part_end)
+            if hi <= lo:
+                return []  # 이 파트엔 요청 구간이 없음 → yt-dlp 가 다운로드를 건너뜀
+            return [{'start_time': lo - off, 'end_time': hi - off}]
+
         if clip:
-            from yt_dlp.utils import download_range_func
-            ydl_opts['download_ranges'] = download_range_func(None, [clip])
+            ydl_opts['download_ranges'] = clip_ranges
             ydl_opts['force_keyframes_at_cuts'] = True
             s, e = clip
             rng = f"{self._fmt_secs(s)} ~ {'끝' if e == float('inf') else self._fmt_secs(e)}"
@@ -1287,6 +1313,9 @@ class DownloaderApp(ctk.CTk):
         total_count = len(urls)
         success = 0
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            if clip:
+                # 세그먼트 창 방식(SOOP)의 잔여 컷 후처리기. 내장 후처리기(MP3 변환 등) 뒤에 실행된다.
+                ydl.add_post_processor(self._make_trim_pp(), when='post_process')
             for idx, url in enumerate(urls, 1):
                 if self.cancel_flag.is_set():
                     break
@@ -1298,7 +1327,13 @@ class DownloaderApp(ctk.CTk):
                     continue
                 try:
                     info = None
-                    if platform == '치지직':
+                    if clip and platform == 'SOOP':
+                        # SOOP 다시보기(fMP4 HLS)는 ffmpeg 의 -ss 입력 seek 가 마지막 세그먼트로
+                        # 튀어 0 프레임이 나온다(실측). 세그먼트 창을 직접 잘라 받는다.
+                        info = self._download_soop_clip(ydl, url, clip)
+                    elif clip and platform != '치지직':  # 치지직은 단일 영상(자체 추출기)이라 불필요
+                        self._prepare_clip_offsets(ydl, url, clip_offsets, clip)
+                    if info is None and platform == '치지직':
                         info = self._download_chzzk(ydl, url)
                     if info is None:
                         info = ydl.extract_info(url, download=True)
@@ -1323,6 +1358,188 @@ class DownloaderApp(ctk.CTk):
         else:
             done_msg = f'완료: {success}/{total_count} 개 다운로드'
         self.msg_queue.put(('done', done_msg))
+
+    def _prepare_clip_offsets(self, ydl, url, clip_offsets, clip):
+        """여러 파트(multi_video)로 오는 다시보기의 파트별 시작 오프셋을 미리 계산해 둔다.
+        구간 잘라받기 전용. 단일 영상이나 일반 재생목록(서로 다른 영상)은 건드리지 않는다."""
+        try:
+            pre = ydl.extract_info(url, download=False)
+        except Exception:
+            return  # 같은 오류가 본 다운로드에서 그대로 보이므로 여기선 조용히 넘어간다
+        if not pre or pre.get('_type') != 'multi_video':
+            return
+        entries = [en for en in (pre.get('entries') or []) if en]
+        if len(entries) < 2:
+            return
+        offs, acc = [], 0
+        for en in entries:
+            offs.append(acc)
+            acc += en.get('duration') or 0
+        clip_offsets[pre.get('id')] = offs
+        s, e = clip
+        hit = [i + 1 for i, off in enumerate(offs)
+               if max(s, off) < min(e, off + (entries[i].get('duration') or float('inf')))]
+        self.msg_queue.put(('log', f"   · {len(entries)}개 파트 중 구간이 걸친 파트: {', '.join(map(str, hit)) or '없음'}"))
+
+    # ── SOOP 구간 잘라받기: 세그먼트 창 + 잔여 컷 ─────────────────────────
+    @staticmethod
+    def _ffmpeg_exe():
+        d = ffmpeg_dir()
+        name = 'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg'
+        return os.path.join(d, name) if d else name
+
+    def _hls_window_formats(self, ydl, entry, lo, hi):
+        """entry 의 원격 m3u8 포맷들을 [lo, hi]초를 덮는 세그먼트만 담은 로컬 플레이리스트로 재작성한다.
+        세그먼트 경계 때문에 남는 앞머리(잔여)와 실제 길이는 포맷 dict 에 'app_clip_trim' 으로 넣어
+        후처리기(_make_trim_pp)가 정확히 잘라낸다. 재작성한 포맷 수를 반환(0 이면 적용 불가)."""
+        import pathlib
+        import tempfile
+        from urllib.parse import urljoin
+        from yt_dlp.networking import Request
+        headers = entry.get('http_headers') or {}
+        tmpdir = tempfile.mkdtemp(prefix='hls-window-')
+        done = 0
+        for fmt in entry.get('formats') or []:
+            url = fmt.get('url') or ''
+            if not (fmt.get('protocol') or '').startswith('m3u8') or not url.startswith('http'):
+                continue
+            try:
+                text = ydl.urlopen(Request(url, headers=headers)).read().decode('utf-8', 'replace')
+            except Exception:
+                continue
+            head, segs, pending = [], [], []   # segs: (ext 줄들, uri, duration)
+            for line in text.splitlines():
+                s = line.strip()
+                if not s:
+                    continue
+                if s.startswith('#EXTINF'):
+                    pending.append(s)
+                elif s.startswith('#EXT-X-ENDLIST'):
+                    continue
+                elif s.startswith('#EXT-X-MAP'):
+                    if 'URI="' in s:  # 초기화 세그먼트는 절대 URL 로
+                        u = re.search(r'URI="([^"]+)"', s).group(1)
+                        s = s.replace(f'URI="{u}"', f'URI="{urljoin(url, u)}"')
+                    head.append(s)
+                elif s.startswith('#'):
+                    if segs or pending:
+                        pending.append(s)  # 세그먼트에 붙는 태그(KEY/DISCONTINUITY 등) → 해당 세그먼트와 함께
+                    else:
+                        head.append(s)
+                else:
+                    try:
+                        dur = float(re.search(r'#EXTINF:([\d.]+)', pending[-1]).group(1))
+                    except Exception:
+                        dur = 0.0
+                    segs.append((pending, urljoin(url, s), dur))
+                    pending = []
+            if not segs:
+                continue
+            # 누적 시간으로 창 [i0, i1] 선택
+            cum, t = [], 0.0
+            for _, _, d in segs:
+                cum.append(t)
+                t += d
+            total = t
+            i0 = next((i for i, c in enumerate(cum) if c + segs[i][2] > lo), None)
+            if i0 is None:
+                continue  # 구간 시작이 이 파트 끝을 넘음
+            i1 = max(i for i, c in enumerate(cum) if c < min(hi, total))
+            window = segs[i0:i1 + 1]
+            residual = max(0.0, lo - cum[i0])
+            length = max(0.0, min(hi, total) - lo)
+            lines = [h for h in head if not h.startswith('#EXT-X-MEDIA-SEQUENCE')]
+            lines.append(f'#EXT-X-MEDIA-SEQUENCE:{i0}')
+            for ext_lines, uri, _ in window:
+                lines.extend(ext_lines)
+                lines.append(uri)
+            lines.append('#EXT-X-ENDLIST')
+            content = '\n'.join(lines) + '\n'
+            path = os.path.join(tmpdir, f"{fmt.get('format_id') or 'f'}.m3u8")
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            fmt.update({
+                'url': pathlib.Path(path).as_uri(),
+                'hls_media_playlist_data': content,
+                'protocol': 'm3u8_native',
+                'app_clip_trim': (residual, length),
+            })
+            done += 1
+        if done:
+            entry['app_windowed'] = True
+        return done
+
+    def _download_soop_clip(self, ydl, url, clip):
+        """SOOP 다시보기 구간 잘라받기. 파트(multi_video)별 로컬 구간을 계산해 세그먼트 창만 받는다.
+        적용 불가(HLS 포맷 없음 등)면 None 을 돌려 일반 경로로 넘긴다."""
+        pre = ydl.extract_info(url, download=False)
+        if not pre:
+            return None
+        if pre.get('_type') == 'multi_video':
+            entries = [en for en in (pre.get('entries') or []) if en]
+        else:
+            entries = [pre]
+        if not entries:
+            return None
+        s, e = clip
+        offs, acc = [], 0.0
+        for en in entries:
+            offs.append(acc)
+            acc += en.get('duration') or 0
+        plan = []
+        for i, en in enumerate(entries):
+            off = offs[i]
+            part_end = off + (en.get('duration') or float('inf'))
+            lo, hi = max(s, off) - off, min(e, part_end) - off
+            if hi > lo:
+                plan.append((i + 1, en, lo, hi))
+        if not plan:
+            self.msg_queue.put(('log', '   ✗ 요청한 구간이 영상 길이를 벗어났습니다.'))
+            return pre
+        if len(entries) > 1:
+            self.msg_queue.put(('log', f"   · {len(entries)}개 파트 중 구간이 걸친 파트: {', '.join(str(p[0]) for p in plan)}"))
+        last = None
+        for _, en, lo, hi in plan:
+            if self.cancel_flag.is_set():
+                break
+            if not self._hls_window_formats(ydl, en, lo, hi):
+                return None  # 창 방식 불가 → 일반 경로(ffmpeg -ss)로
+            last = ydl.process_ie_result(en, download=True)
+        # 여러 파트를 받았으면 완료 로그엔 '(part N)' 대신 다시보기 제목을 보여준다
+        return pre if len(plan) > 1 else (last or pre)
+
+    def _make_trim_pp(self):
+        """세그먼트 창으로 받은 파일의 잔여 앞머리를 잘라 정확한 구간으로 만드는 후처리기."""
+        import subprocess
+        from yt_dlp.postprocessor import PostProcessor
+        ffmpeg = self._ffmpeg_exe()
+
+        class _ClipTrimPP(PostProcessor):
+            def run(_pp, info):
+                trim = info.get('app_clip_trim')
+                path = info.get('filepath')
+                if not trim or not path or not os.path.exists(path):
+                    return [], info
+                residual, length = trim
+                if length <= 0:
+                    return [], info
+                root, ext = os.path.splitext(path)
+                tmp = f'{root}.trim{ext}'
+                # 출력측 -ss(정확 seek). 잔여는 세그먼트 1개 이내라 디코딩 부담이 없다. 재인코딩으로 컷 정확도 확보.
+                cmd = [ffmpeg, '-y', '-loglevel', 'error', '-i', path,
+                       '-ss', f'{residual:.3f}', '-t', f'{length:.3f}', tmp]
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode == 0 and os.path.getsize(tmp) > 0:
+                    os.replace(tmp, path)
+                else:
+                    try:
+                        os.remove(tmp)
+                    except Exception:
+                        pass
+                    _pp.report_warning(f'구간 컷 실패, 창 전체를 남깁니다: {(r.stderr or "").strip()[-200:]}')
+                return [], info
+
+        return _ClipTrimPP()
 
     def _download_chzzk(self, ydl, url):
         """치지직 다시보기/클립을 자체 추출기로 받는다. 자체 추출이 불가능하면 None
