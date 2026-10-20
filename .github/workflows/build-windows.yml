@@ -51,7 +51,29 @@ jobs:
           path: dist/YouTubeDownloader.exe
 
       - name: Attach to Release (태그 푸시일 때만 · 아티팩트와 무관)
+        id: release
         if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
         uses: softprops/action-gh-release@v2
         with:
           files: dist/YouTubeDownloader.exe
+
+      - name: Discord 스레드에 릴리스 알림 (secrets 없으면 건너뜀)
+        if: ${{ startsWith(github.ref, 'refs/tags/') && steps.release.outcome == 'success' }}
+        shell: pwsh
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_THREAD_ID: ${{ secrets.DISCORD_THREAD_ID }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if (-not $env:DISCORD_WEBHOOK_URL) { Write-Host "DISCORD_WEBHOOK_URL 시크릿 없음 → 알림 건너뜀"; exit 0 }
+          $subject = (git tag -l --format='%(contents:subject)' $env:TAG 2>$null | Select-Object -First 1)
+          $lines = @("📦 **YouTube Downloader $($env:TAG)** 윈도우 빌드 완료")
+          if ($subject) { $lines += $subject }
+          $lines += "릴리스: https://github.com/$($env:REPO)/releases/tag/$($env:TAG)"
+          $lines += "exe 바로받기: https://github.com/$($env:REPO)/releases/download/$($env:TAG)/YouTubeDownloader.exe"
+          $body = @{ content = ($lines -join "`n"); allowed_mentions = @{ parse = @() } } | ConvertTo-Json -Depth 3 -Compress
+          $url = $env:DISCORD_WEBHOOK_URL
+          if ($env:DISCORD_THREAD_ID) { $url = $url + "?thread_id=" + $env:DISCORD_THREAD_ID }
+          Invoke-RestMethod -Uri $url -Method Post -ContentType 'application/json; charset=utf-8' -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) | Out-Null
+          Write-Host "Discord 알림 전송 완료"

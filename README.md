@@ -122,6 +122,25 @@ PyInstaller 는 크로스 컴파일이 안 되므로 Windows exe 는 이 워크�
 - **수동 실행**: 저장소 → Actions → *Build Windows EXE* → *Run workflow* → 완료 후 Artifacts 에서 `YouTubeDownloader.exe` 다운로드
 - **릴리스**: `git tag v1.2.0 && git push origin v1.2.0` → 빌드 후 해당 태그 Release 에 exe 자동 첨부
 
+### 디스코드 스레드 자동 알림 (선택)
+
+태그 빌드가 끝나 Release 에 exe 가 붙으면, 지정한 **디스코드 스레드**에 버전·릴리스 링크·exe 링크를 자동으로 올립니다.
+시크릿이 없으면 조용히 건너뛰므로 설정 전에도 빌드는 그대로 됩니다.
+
+1. 디스코드에서 스레드가 속한 **상위 채널** → 채널 편집 → 연동 → 웹훅 → 새 웹훅 → URL 복사
+2. 설정 → 고급 → **개발자 모드** 켜고, 스레드 우클릭 → **ID 복사**
+3. 저장소에 시크릿 2개 등록 (Settings → Secrets and variables → Actions, 또는 터미널):
+   ```bash
+   gh secret set DISCORD_WEBHOOK_URL   # 붙여넣기 프롬프트에 웹훅 URL
+   gh secret set DISCORD_THREAD_ID     # 스레드 ID 숫자
+   ```
+4. Actions → **Discord 알림 테스트** → Run workflow 로 먼저 확인 (빌드 없이 메시지만 보냄)
+
+- `DISCORD_THREAD_ID` 를 비우면 웹훅의 채널(상위 채널)에 올라갑니다.
+- 스레드가 **보관(archive)** 되면 웹훅이 못 올립니다 — 스레드 자동 보관 기간을 길게 두거나 보관 해제해 두세요.
+- 포럼 채널이면 웹훅은 포럼에 만들고, 글(스레드) ID 를 `DISCORD_THREAD_ID` 에 넣습니다.
+- 알림은 Windows 빌드 워크플로에서 1회만 보냅니다(맥 zip 은 같은 Release 에 뒤따라 붙음).
+
 `.github/workflows/build-macos.yml` 은 **macOS 러너에서 `.app` 을 자동 빌드**합니다
 (Apple Silicon `arm64` + Intel `x86_64` 둘 다, ffmpeg 정적 바이너리 자동 번들, `.zip` 으로 패키징).
 
